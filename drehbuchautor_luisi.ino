@@ -1,35 +1,5 @@
 // Hello
 // makes LEDs dance with audio input thingy
-
-
-// HOW TO:
-// ADJUST MAX VOULME = 100% Brightness:
-//   During startup, the KI lights up yellow for 3 seconds. press the button on the underside during that.
-//   The under light will be red and the top light is an approximation that reflects the heard sound.
-//   Play a sound or something until you have reached the maximum loudness level. Press the button again to save the played maximum loudness level.
-//   
-// ADJUST BRIGHTNESS:
-//   Turn knob on the underside anytime. If there is no sound, there is no light, which might be confusing. Press the button during playback and
-//   the top light will be lit (and the underside is blue). Adjust the knob until satisfied, press the button to save.
-//   
-// ADJUST ANGRYNESS
-//   This describes how accurately the lights flicker during playback. Max right, slow moving light. Full left, its quite nervous.
-//   
-// BLUETOOTH
-//   connect to UGREEN_XXX device with MAC.
-//   
-// PLAYBACK
-//   On MAC, open the default program "Audio Midi Setup.app" (under Programs/utilities/).
-//   - Add a new device ("Plus" on bottom left: "Create Multi output device")
-//   - Add the BT UGREEN Speaker to it and the secondary device you want to hear something - "MacBook Speakers" or "external headphones" (jack 3.5mm)
-//   - check all the boxes "use" and "Drift correction"
-//   - Balance and volume per device are now adjsutable when you click on the "MacBook Speakers" bzw BT device
-//   - if necessary, right click on the "Multi output device" and click "use this device for sound output".
-//   
-// TOP LIGHT/LOWER LIGHTS
-//   The top ring lights up if left or right audio is playing. 
-//   The bottom ring lights up *only* if audio is playing on the right, it will ignore sounds on the left.
-
 #include <EEPROM.h>
 
 // for peter luisi
