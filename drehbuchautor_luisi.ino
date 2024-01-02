@@ -1,311 +1,328 @@
-// Hello
-// makes LEDs dance with audio input thingy
-#include <EEPROM.h>
-
 // for peter luisi
 #include <FastLED.h>
 
 #define LED_PIN 2
 #define NUM_LEDS 48
-#define BRIGHTNESS 255
 #define LED_TYPE WS2812B
 #define COLOR_ORDER GRB  // If colors are wrong, use GRB / BGR / RGB (2801). \
                          // APA102=BGR, WS2812/Neopixel=GRB
-
-// FOR TGHIS WORKS BITCHES
-float ALPHA = 0.05;  // Smoothing factor. Bigger = less smoothing
-
-const float ALPHA_FAST = 0.15;   // 0.3..0.85 // Higher alpha for faster response.
-float ALPHA_SLOW = 0.2;  // 0.1...0.015   0.3  0.5=very jittery but responsive // Lower alpha for more smoothing. Higher frequency of peaks is smoothed = fast curves destroyer
-// Variables to store the two-stage EMA values
-float emaL_fast = 0, emaL_slow = 0;
-float emaR_fast = 0, emaR_slow = 0;
-
-int brightnessPin = A2;
-int angryPin = A1;
-int audioInPinL = A5;  // only LEFt channel
-int audioInPinR = A6;  // both right and Left channel??
-int calibrateBtn = 4;
-
-int brightness = 0;
-int angryness = 255;
-CRGB color = CRGB(255, 255, 255);
 CRGB leds[NUM_LEDS];
 
-float ema = 0;  // Initial EMA value: "Exponential Moving Average"
-float emaL = 0;  // Initial EMA value: "Exponential Moving Average"
-float emaR = 0;  // Initial EMA value: "Exponential Moving Average"
+bool SINUS = false;      // If defined, makes sinus waves, read brightness poti
+bool BLINKTEST = false;  // Cycles between min / max brightness every 2.5s, read brightness poti
+bool CALIBRATE = false;  // Display color sent via serial command `255,255,255`, read brightness poti
 
-int redScalingFalloff = 66;  // if dimming is below that, the red is disproportionally reduced due to red being stronger as other colors
-float redShift = 0.75;  // factor with which the red gets shifted. smaller = more blue, approaching 1 = more red
+// Colors
+CRGB colorLowerLeds = CRGB(30,255,100);  // MAIN COLORS! bizli meh cyan
+CRGB colorUpperLeds = CRGB(20,222,255);  // MAIN COLORS! babyblau
+CRGB thungsten = CRGB(255,120,2);  // pseudo warm
+CRGB white = CRGB(255,255,255);
+CRGB warmWhite = CRGB(255,130,20);
+CRGB black = CRGB(0,0,0);
+CRGB red = CRGB(255,0,0);
+CRGB green = CRGB(0,255,0);
+CRGB yellow = CRGB(255,255,0);
+CRGB blue = CRGB(0,0,255);
 
-int maxVol = 0;  // 100 may be good
+// Define the button pins
+int breakpointPin = A1;
+int brightnessPin = A2;
+int audioInPinL = A5;       // only LEFt channel
+int audioInPinR = A6;       // both right and Left channel somehow
+const int calibrateBtn = 4; // push btn
 
-int noise = 5;   // 5?                 // cut off base level noise
-const int numMeasurements = 16;  // bigger the number, the softer the curve/"afterglow"
-float currGlow = 0;
-const float afterglow = .99;
-int rollingAverages[numMeasurements] = { 0 };  // 1D array for rolling averages
-int rollingAverage = 0;
-const int minBrightness = 0;
+int breakpoint = 15;
+// Hysteresis threshold for volume level
+int hysteresis = 8; // Adjust this value to create a buffer around the breakpoint; was 10 which kinda worked
 
-// the setup routine runs once when you press reset:
+int baselight = 20;  // Brightness when waiting between text
+int baselightInitial = baselight;
+
+float incrementAngle = 0.396;  // 0.66 Speed of increment when fastest
+float decrementAngle = 0.465;  // incrementAngle//3.141 Speed of decrement
+
+bool isIncreasing = false; // Start with increasing mode
+float value = 0;           // The sinusoidal value AND the main value to send to the FASTLEDs
+float smoothedOutputBrightness = 0;  // smoothed value that is sent to the FASTLEDs
+float angle = 0;           // Angle for the waves
+int lastState = false;     // Last read state of the button
+int noise = 8;             // Threshold of vloume, if lower than this noise is not triggering the LEDs
+int brightness = 0;        // Value read from the potentiometer
+float smoothedBrightness = 0; // Variable to store the smoothed brightness of potentiometer
+const float alpha = 0.1;   // Smoothing factor - lower is smoother for analogRead Potis
+
+int serialRed = 0;
+int serialGreen = 0;
+int serialBlue = 0;
+
+unsigned long sinusStartTime = 0; 
+unsigned long sinusCurrentTime = 0;
+
+void resetColors() {
+  // UNTEN
+  for (int x = 0; x < 24; x++) {
+    // QUASI GUT :
+    leds[x] = colorLowerLeds;  // Set LED color and brightness
+    if(x % 2 == 0) leds[x] = black;  // Only every second LED is on
+    //leds[x] = CRGB(15,125,50);  // Set LED color and brightness
+  }
+  // OBEN
+  for (int i = 24; i < NUM_LEDS; i++) {
+    // QUASI GUT leds[i] = colorUpperLeds;  // Set LED color and brightness
+    leds[i] = colorUpperLeds;  // Set LED color and brightness
+    //leds[i] = CRGB(10,111,125);  // Set LED color and brightness
+  }
+
+  // Show all leds
+  FastLED.show();
+}
+
 void setup() {
-  delay(2000);  // wait for flashing
-  // initialize serial communication at 9600 bits per second:
-  Serial.begin(230400);  // Makes println go prrr
-
+  Serial.begin(38400);
+  // Initialize the button pin as an input with internal pull-up
+  pinMode(calibrateBtn, INPUT_PULLUP);
+  pinMode(brightnessPin, INPUT);
+  pinMode(breakpointPin, INPUT);
   pinMode(audioInPinL, INPUT);
   pinMode(audioInPinR, INPUT);
-  pinMode(brightnessPin, INPUT);
-  pinMode(angryPin, INPUT);
-  pinMode(calibrateBtn, INPUT_PULLUP);
 
   // LED TYPE WS2812
   FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection(TypicalLEDStrip);
 
-  // Show all leds
-  fill_solid(leds, NUM_LEDS, color);
-  FastLED.show();
-  delay(500);
-  fill_solid(leds, NUM_LEDS, CRGB(255,255,0));
-  FastLED.show();
+  smoothedBrightness = analogRead(brightnessPin); // Initialize with the first reading
+  // analogRead(breakpointPin) = 695 was best for attack (?)
 
-  // loop for 2s - if btn is pressed, do calibrate()
-  // while(true && digitalRead(calibrateBtn)) {
-    //   if(!digitalRead(calibrateBtn)) calibrate();
-  // }
-
-  unsigned long startTime = millis();
-  bool calibrated = false;
-  EEPROM.get(0, maxVol);
-  brightness = map(analogRead(brightnessPin), 0,1024, 0,255);
-
-  while (millis() - startTime < 3000) { // 2000 milliseconds = 2 seconds
-    if (!digitalRead(calibrateBtn)) {
-      while(!digitalRead(calibrateBtn)) {
-        Serial.println("wait for btn release");
-        delay(50);
-      }
-      Serial.println("Start calibration");
-      calibrateMaxVol();
-      calibrated = true;
-      break; // Exit the loop after calibrating
-    }
+  // Enter SINUS mode for calibration
+  if(!digitalRead(calibrateBtn)) {
+    Serial.println("Button pressed during startup");
+    SINUS = true;
   }
-  if (!calibrated) {
-    Serial.println("Calibration skipped");
-  }
-
-  Serial.println("*********************************");
-  Serial.println("Startup complete.");
-  Serial.println("*********************************");
-}
-
-void calibrateBrightness() {
-  // Calibrate dimming here a thing for 6s
-  Serial.println("Set brightness");
-  while(digitalRead(calibrateBtn)) {
-    brightness = map(analogRead(brightnessPin), 0,1024, 0,255);
-    brightness = brightness / 3 * 3;  // Remove jitter
-    ///Serial.print("Brightness: ");
-    ///Serial.println(brightness);
-    fill_solid(leds, NUM_LEDS, CRGB(255-brightness, 255-brightness, 255-brightness));
-    // Display lower LEDs blue
-    for (int i = 0; i < 24; i++) {
-      leds[i] = CRGB(0, 0, 255);  // Set LED color and brightness
-    }
+  long btnPress = millis();
+  while(!digitalRead(calibrateBtn)) {
+    Serial.println("wait for btn release");
+    fill_solid(leds, NUM_LEDS, red);
     FastLED.show();
-    delay(1);
+    delay(50);
   }
 
-  Serial.print("brightness set to ");
-  Serial.println(brightness);
+  // Set standard colors
+  resetColors();
 
-  // Blink four times
-  blink(4, 400);
-}
-
-void calibrateMaxVol() {
-  // Set maxVol
-  fill_solid(leds, NUM_LEDS, color);
-  FastLED.show();
-  // READ LAST VALUE FROM internal EEPROM
-  int currVol = 0;
-  maxVol = 0;
-  
-  // TODO: how to lower the maxVol without having to re-calibrate
-  Serial.println("Set max volume. Scream as loud as you will now.");
-  while(digitalRead(calibrateBtn)) {
-    // if (!digitalRead(calibrateBtn)) {
-    //   maxVol = 0;
-    //   fill_solid(leds, NUM_LEDS, CRGB(0, 255, 255));
-    //   FastLED.show();
-    //   delay(500);
-    // }
-    currVol = (analogRead(audioInPinL) + analogRead(audioInPinR)) / 2;
-
-    if(currVol > maxVol) maxVol = currVol;
-    // maxVol = currVol;
-    int tempColor = map(currVol, 0,100, 0, 255);
-    // Fill upper ring according to cu
-    fill_solid(leds, NUM_LEDS, CRGB(tempColor, tempColor, tempColor));
-    // Display lower LEDs red
-    for (int i = 0; i < 24; i++) {
-      leds[i] = CRGB(255, 0, 0);  // Set LED color and brightness
-    }
-    FastLED.show();
-
-    ///Serial.print("currVol: ");
-    ///Serial.print(currVol);
-    ///Serial.print("\tmaxVol: ");
-    ///Serial.print(maxVol);
-    ///Serial.println();
-    delay(1);
-  }
-
-  // if vol was not succesful, fill in arbitrary value
-  if(maxVol < 25) maxVol  = 100;
-  // Save maxVol to memory
-  Serial.print("Set maxVol to ");
-  Serial.println(maxVol);
-  EEPROM.put(0, maxVol);
-
-  // Blink four times
-  blink(4, 400);
+  // reset baselight to not be off - waits for first audio fragment
+  baselight = 0;
 }
 
 void loop() {
-  if (!digitalRead(calibrateBtn)) {
+  if(BLINKTEST) {
+    loopBLINKTEST();
+
+  } else if(CALIBRATE) {
+    catchSerialComs();
+    fill_solid(leds, NUM_LEDS, warmWhite);
+
+    int brightness = map(analogRead(brightnessPin), 0,1023, 255,0);
+    FastLED.setBrightness(brightness);
+    FastLED.show();
+    Serial.print(serialRed);
+    Serial.print("\t");
+    Serial.print(serialGreen);
+    Serial.print("\t");
+    Serial.print(serialBlue);
+    Serial.println("");
+    delay(10);
+  
+  } else if(SINUS) {
+    loopSinus();
+
+  } else {
+    loopMain();
+  }
+}
+
+
+void loopMain() {
+    // Read the current state of the button and volume
+  int currentButtonState = digitalRead(calibrateBtn);
+  int rawBrightness = analogRead(brightnessPin);
+  breakpoint = map(analogRead(breakpointPin), 0,1024, 50,noise+1);  // => breakpoint 19 is TESTED and good
+  noise = breakpoint / 5;  // 10 was good but flickering sometimes
+  int left = analogRead(audioInPinL);
+  int right = analogRead(audioInPinR);
+  
+  // Smooth the readings
+  smoothedBrightness = alpha * rawBrightness + (1 - alpha) * smoothedBrightness;
+  brightness = map((int)smoothedBrightness, 0,1023, 255,0);
+
+  // Reset base light to zero when btn is pressed
+  if(!digitalRead(calibrateBtn)) {
+    baselight = 0;
     while(!digitalRead(calibrateBtn)) {
       Serial.println("wait for btn release");
-      delay(50);
+      fill_solid(leds, NUM_LEDS, green);
+      FastLED.show();
+      delay(666);
+      resetColors();
+      delay(250);
     }
-    Serial.println("Start calibration");
-    calibrateBrightness();
+  }
+  
+  int loudest = max(left, right);                                          // pick the loudest channel
+  int volume = map(loudest, 0,breakpoint*2, 0, 255);                       // remap to volume range
+  volume = constrain(volume, noise < baselight ? baselight : noise, 255);  // ensure volume is within 0-255
+
+  hysteresis = breakpoint / 10;  /// wtf chatGPT is this?
+
+  // Hysteresis logic to prevent re-triggering
+  if (isIncreasing && volume < (breakpoint - hysteresis)) {
+    isIncreasing = false;
+    angle = acos(sqrt(value / 255));
+    
+  } else if (!isIncreasing && volume > (breakpoint + hysteresis)) {
+    isIncreasing = true;
+    angle = asin(sqrt(value / 255));
   }
 
-
-  int left = analogRead(audioInPinL);
-  int right = analogRead(audioInPinR);  // - left ??  is both L+R
-
-  // if(left > maxVol) maxVol = left;
-  // if(right > maxVol) maxVol = right;
-
-  // if(left > tempMax) tempMax = left;
-  // if(right > tempMax) tempMax = right;
-
-  // Scale input to 0-255
-  left = map(left, 0, maxVol, 0,255);
-  right = map(right, 0, maxVol, 0,255);
-
-  // Remove everything that may be static noise
-  if(left < noise ) left = 0;
-  if(right < noise ) right = 0;
-
-  // Apply the first stage of EMA (faster)
-  emaL_fast = (left * ALPHA_FAST) + (emaL_fast * (1 - ALPHA_FAST));
-  emaR_fast = (right * ALPHA_FAST) + (emaR_fast * (1 - ALPHA_FAST));
-
-  // Read smoothness form angry potentiometer from 0.01 to 0.666
-  ALPHA_SLOW = map(analogRead(angryPin), 0,1024, 10,666)/1000.0;
-
-  // Apply the second stage of EMA (slower)
-  emaL_slow = (emaL_fast * ALPHA_SLOW) + (emaL_slow * (1 - ALPHA_SLOW));
-  emaR_slow = (emaR_fast * ALPHA_SLOW) + (emaR_slow * (1 - ALPHA_SLOW));
-
-
-
-  // Set colors of upper LED ring
-  // Left is solo channel somehow
-  for (int i = 0; i < 24; i++) {
-    int redValueL = emaL_slow;
-    if (emaL_slow < redScalingFalloff) {
-        redValueL = int(emaL_slow * redShift);
+  if (isIncreasing) {
+    angle += incrementAngle;
+    if (angle > PI / 2) {
+      angle = PI / 2;
+      value = 255;
+      // ??? FIXME: does not zero out if pressed btn
+      // MAYBE  0,brightness)?
+      baselight = map(baselightInitial, 0,255, baselightInitial,brightness);
+    } else {
+      value = (pow(sin(angle), 2) * (255 - baselight)) + baselight; // Adjusted to range from baselight to 255
     }
-    leds[i] = CRGB(redValueL, emaL_slow, emaL_slow);  // Set LED color and brightness
+  } else {
+    angle += decrementAngle;
+    if (angle > PI / 2) {
+      angle = PI / 2;
+      // ??? FIXME: does not zero out if pressed btn
+      // MAYBE  0,brightness)?
+      // if(baselight > 0)
+      value = map(baselight, 0,255, baselightInitial,brightness); // Lower limit adjusted to baselight
+    } else {
+      value = (255 - (pow(sin(angle), 2) * (255 - baselight))) + baselight; // Adjusted to range from 255 to baselight
+    }
   }
 
-  // Set colors of lower LED ring
-  // Right is left & right channel combined somehow
-  for (int x = 24; x < NUM_LEDS; x++) {
-    int redValueR = emaR_slow;
-    if (emaR_slow < redScalingFalloff) {
-        redValueR = int(emaR_slow * redShift);
-    }
-    leds[x] = CRGB(redValueR, emaR_slow, emaR_slow);  // Set LED color and brightness
-  }
+  // Output value smoothing
+  smoothedOutputBrightness = .25 * value + (1 - .25) * smoothedOutputBrightness;
 
-  // Adjsut brightness according to potentiometer
-  // TODO should not contribute to emaL/R. only for colors, but don't go beneath 0
-  brightness = map(analogRead(brightnessPin), 0,1024, 0,255);
-  // left = left - brightness;
-  // right = right - brightness;
-
-  // Do not go under 0 or over 255
-  // left = clamp(left, 0, 254);
-  // right = clamp(right, 0, 254);
-  FastLED.setBrightness(255 - brightness);
+  // Apply the smoothed value to the brightness
+  FastLED.setBrightness(map(smoothedOutputBrightness, 0,255, 0,brightness));
   FastLED.show();
 
-  if(false) {  // ignore for now
-    Serial.print("\temaL_slow:");
-    Serial.print(emaL_slow);
-    Serial.print("\temaR_slow:");
-    Serial.print(emaR_slow + 255);
-    Serial.print("\tbrightness:");
-    Serial.print(brightness);
-    Serial.print("\tALPHA_SLOW:");
-    Serial.print(ALPHA_SLOW);
-    Serial.print("\tfake3:");
-    Serial.print(555);
-    Serial.println();
-
-    Serial.print("L:");
-    Serial.print(left);
-    Serial.print("\tR:");
-    Serial.print(right + 255);
-
-    Serial.print("\temaL_slow:");
-    Serial.print(emaL_slow);
-    Serial.print("\temaR_slow:");
-    Serial.print(emaR_slow + 255);
-    Serial.print("\tALPHA_SLOW:");
-    Serial.print(ALPHA_SLOW);
-
-    Serial.print("\tfake:");
-    Serial.print(255);
-    Serial.print("\tfake3:");
-    Serial.print(555);
-    Serial.print("\tfake2:");
-    Serial.print(0);
-    Serial.print("\tmaxVolume:");
-    Serial.print(maxVol);
-    Serial.println();
-  }
-
-}
-
-void blink(int amount, int duration) {
-  for (int i = 0; i < amount; i++) {
-    Serial.print("blink ");
-    fill_solid(leds, NUM_LEDS, CRGB(0, 0, 0));
-    FastLED.show();
-    delay(duration/3*2);
-    fill_solid(leds, NUM_LEDS, CRGB(0, 255-brightness, 0));
-    FastLED.show();
-    delay(duration);
-  }
+  // Print the values for debugging
+  Serial.print("isIncreasing:");
+  Serial.print(isIncreasing ? 255 : 0);
+  Serial.print("\tloudest:");
+  Serial.print(loudest);
+  Serial.print("\tsmoothedOutputBrightness:");
+  Serial.print((int)smoothedOutputBrightness);
+  Serial.print("\tsmoothedOutputBrightness - brightness:");
+  Serial.print(map(smoothedOutputBrightness, 0,255, 0,brightness));
+  Serial.print("\tbrightness:");
+  Serial.print(brightness);
+  Serial.print("\tbreakpoint:");
+  Serial.print(breakpoint);
+  Serial.print("\tx:");
+  Serial.print(300);
+  Serial.print("\tz:");
+  Serial.print(0);
   Serial.println();
+  delay(10); // Short delay to stabilize the output
 }
 
-int clamp(int value, int min, int max) {
-  if (value < min) return min;
-  if (value > max) return max;
-  return value;
+
+void catchSerialComs() {
+  while (Serial.available() > 0) {
+    // Awaits a string like "255,111,23"
+    // look for the next valid integer in the incoming serial stream:
+    serialRed = Serial.parseInt();
+    // do it again:
+    serialGreen = Serial.parseInt();
+    // do it again:
+    serialBlue = Serial.parseInt();
+    if (Serial.read() == '\n') {
+      warmWhite = CRGB(serialRed, serialGreen, serialBlue);
+    }
+  }
 }
 
-float mapfloat(long x, long in_min, long in_max, long out_min, long out_max) {
-  return (float)(x - in_min) * (out_max - out_min) / (float)(in_max - in_min) + out_min;
+void loopBLINKTEST() {
+  int brightness = map(analogRead(brightnessPin), 0,1023, 255,0);
+  int max = brightness;
+  int min = max;  // /3.1875;
+
+  for (int x = 0; x < 24; x++) {
+    leds[x] = colorLowerLeds;  // Set LED color and brightness
+    if(x % 2 == 0) leds[x] = black;  // Only every other
+  }
+  // OBEN
+  for (int i = 24; i < NUM_LEDS; i++) {
+    leds[i] = colorUpperLeds;  // Set LED color and brightness
+  }
+  FastLED.setBrightness(min);
+  FastLED.show();
+  delay(2500);
+
+  FastLED.setBrightness(255);
+  FastLED.show();
+
+  Serial.print("\tmin:");
+  Serial.print(min);
+  Serial.print("\tmax:");
+  Serial.print(max);
+  Serial.println();
+  delay(2500);
 }
 
+// SINUSOIDAL WAVE
+void loopSinus() {
+  sinusCurrentTime += 10; // Increment current time
+  
+  // Define the period of the sine wave in milliseconds
+  unsigned long period = 7500;
+
+  // Calculate the current phase of the sine wave, given by the current time modulo the period
+  float phase = (sinusCurrentTime - sinusStartTime) * TWO_PI / period;
+  
+  // Calculate the sine of the phase, scale it to the range 0-1, and then scale to 0-255
+  float value = (sin(phase) + 1) * 127.5;
+
+  // Apply a longer delay when the value is at the extremes (0 or 255)
+  // if(ceil(value) >= 254 || floor(value)  == 0) {
+  if(ceil(value) >= 254) {
+    delay(25); // Longer delay at the peak
+  }
+
+  baselight = baselightInitial;  // reset because setup();
+
+  int brightness = map(analogRead(brightnessPin), 0,1023, 0,255);
+  value = map(value, 0,255, baselight,255-brightness);
+
+  // Set brightnes lower for lower LED ring
+  // UNTEN
+  for (int x = 0; x < 24; x++) {
+    // QUASI GUT :
+    leds[x] = colorLowerLeds;  // Set LED color and brightness
+    if(x % 2 == 0) leds[x] = black;
+  }
+  // OBEN
+  for (int i = 24; i < NUM_LEDS; i++) {
+    leds[i] = colorUpperLeds;  // Set LED color and brightness
+  }
+
+  // Use the value for LED brightness
+  Serial.print(value);
+  Serial.print(" ceil:  ");
+  Serial.print(ceil(value));
+  Serial.print(" floor: ");
+  Serial.println(floor(value));
+
+  FastLED.setBrightness(value);
+  FastLED.show();
+
+  delay(10); // Short delay for the rest of the cycle
+}
