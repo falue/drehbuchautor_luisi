@@ -51,12 +51,21 @@ int brightness = 0;        // Value read from the potentiometer
 float smoothedBrightness = 0; // Variable to store the smoothed brightness of potentiometer
 const float alpha = 0.1;   // Smoothing factor - lower is smoother for analogRead Potis
 
+int smoothedVolume = 0;
+int lastTrigger = 0;
+int smoothedTrigger = 0;
+
 int serialRed = 0;
 int serialGreen = 0;
 int serialBlue = 0;
 
+
 unsigned long sinusStartTime = 0; 
 unsigned long sinusCurrentTime = 0;
+
+
+// This causes the microcontroller to jump directly to the reset vector.
+void(* reboot) (void) = 0;
 
 void resetColors() {
   // UNTEN
@@ -139,7 +148,6 @@ void loop() {
   }
 }
 
-
 void loopMain() {
     // Read the current state of the button and volume
   int currentButtonState = digitalRead(calibrateBtn);
@@ -148,90 +156,84 @@ void loopMain() {
   noise = breakpoint / 5;  // 10 was good but flickering sometimes
   int left = analogRead(audioInPinL);
   int right = analogRead(audioInPinR);
-  
+
   // Smooth the readings
   smoothedBrightness = alpha * rawBrightness + (1 - alpha) * smoothedBrightness;
   brightness = map((int)smoothedBrightness, 0,1023, 255,0);
+  
+  int loudest = max(left, right);                                          // pick the loudest channel
+  int volume = map(loudest, 0,breakpoint*2, 0,255);                       // remap to volume range
+  //volume = constrain(volume, noise < baselight ? baselight : noise, 255);  // ensure volume is within 0-255
+  volume = constrain(volume, 0, 255);  // ensure volume is within 0-255
 
+  // NEW
+  // Smooth the readings
+  smoothedVolume = 0.25 * volume + (1 - 0.25) * smoothedVolume;
+  
   // Reset base light to zero when btn is pressed
   if(!digitalRead(calibrateBtn)) {
     baselight = 0;
+    ///initialTrigger = false;
     while(!digitalRead(calibrateBtn)) {
       Serial.println("wait for btn release");
       fill_solid(leds, NUM_LEDS, green);
+      FastLED.setBrightness(255);
       FastLED.show();
       delay(666);
+      FastLED.setBrightness(baselight);
       resetColors();
       delay(250);
     }
+    //  MAYBE AHRD RELOAD ??????
+    reboot();
   }
-  
-  int loudest = max(left, right);                                          // pick the loudest channel
-  int volume = map(loudest, 0,breakpoint*2, 0, 255);                       // remap to volume range
-  volume = constrain(volume, noise < baselight ? baselight : noise, 255);  // ensure volume is within 0-255
 
-  hysteresis = breakpoint / 10;  /// wtf chatGPT is this?
+  // ms or something during which the volume has to eclipse the breakpoint
+  hysteresis = 4;
 
   // Hysteresis logic to prevent re-triggering
-  if (isIncreasing && volume < (breakpoint - hysteresis)) {
+  // if (isIncreasing && smoothedVolume < (breakpoint - hysteresis)) {
+  if (isIncreasing && smoothedVolume+noise < (breakpoint - hysteresis)) {
     isIncreasing = false;
-    angle = acos(sqrt(value / 255));
-    
-  } else if (!isIncreasing && volume > (breakpoint + hysteresis)) {
+    // angle = acos(sqrt(value / 255));
+    // lastTrigger = !initialTrigger ? baselight : 0;
+    lastTrigger = baselight;
+  // } else if (!isIncreasing && smoothedVolume > (breakpoint + hysteresis)) {
+  } else if (!isIncreasing && smoothedVolume-noise > (breakpoint + hysteresis)) {
     isIncreasing = true;
-    angle = asin(sqrt(value / 255));
+    // angle = asin(sqrt(value / 255));
+    lastTrigger = 255;
+    baselight = baselightInitial;
   }
 
-  if (isIncreasing) {
-    angle += incrementAngle;
-    if (angle > PI / 2) {
-      angle = PI / 2;
-      value = 255;
-      // ??? FIXME: does not zero out if pressed btn
-      // MAYBE  0,brightness)?
-      baselight = map(baselightInitial, 0,255, baselightInitial,brightness);
-    } else {
-      value = (pow(sin(angle), 2) * (255 - baselight)) + baselight; // Adjusted to range from baselight to 255
-    }
-  } else {
-    angle += decrementAngle;
-    if (angle > PI / 2) {
-      angle = PI / 2;
-      // ??? FIXME: does not zero out if pressed btn
-      // MAYBE  0,brightness)?
-      // if(baselight > 0)
-      value = map(baselight, 0,255, baselightInitial,brightness); // Lower limit adjusted to baselight
-    } else {
-      value = (255 - (pow(sin(angle), 2) * (255 - baselight))) + baselight; // Adjusted to range from 255 to baselight
-    }
-  }
+  smoothedTrigger = 0.25 * lastTrigger + (1 - 0.25) * smoothedTrigger;
 
-  // Output value smoothing
-  smoothedOutputBrightness = .25 * value + (1 - .25) * smoothedOutputBrightness;
-
-  // Apply the smoothed value to the brightness
-  FastLED.setBrightness(map(smoothedOutputBrightness, 0,255, 0,brightness));
+  FastLED.setBrightness(map(smoothedTrigger, 0,255, 0,brightness));
   FastLED.show();
 
-  // Print the values for debugging
-  Serial.print("isIncreasing:");
-  Serial.print(isIncreasing ? 255 : 0);
+  Serial.print("\ttrigger:");
+  Serial.print(lastTrigger);
+  Serial.print("\tsmoothedTrigger:");
+  Serial.print(smoothedTrigger);
+
   Serial.print("\tloudest:");
   Serial.print(loudest);
-  Serial.print("\tsmoothedOutputBrightness:");
-  Serial.print((int)smoothedOutputBrightness);
-  Serial.print("\tsmoothedOutputBrightness - brightness:");
-  Serial.print(map(smoothedOutputBrightness, 0,255, 0,brightness));
-  Serial.print("\tbrightness:");
-  Serial.print(brightness);
+  Serial.print("\tvolume:");
+  Serial.print(volume);
+  Serial.print("\tsmoothedVolume:");
+  Serial.print(smoothedVolume);
   Serial.print("\tbreakpoint:");
   Serial.print(breakpoint);
-  Serial.print("\tx:");
+  Serial.print("\tnoise:");
+  Serial.print(noise);
+  
+  Serial.print("\theadroom:");
   Serial.print(300);
-  Serial.print("\tz:");
+  Serial.print("\tflooring:");
   Serial.print(0);
   Serial.println();
   delay(10); // Short delay to stabilize the output
+
 }
 
 
